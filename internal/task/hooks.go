@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,6 +172,12 @@ func safeTrellisPathsToAdd(root, taskName string) []string {
 			paths = append(paths, DirSunshine+"/"+DirTasks+"/"+DirArchive+"/"+taskName)
 		}
 	}
+	// 项目根 .gitattributes：add-session 调 EnsureGitattributes 追加了 journal
+	// merge=union 规则（见下），没有它这条规则永远进不了提交。
+	// 仅当文件存在且含该规则时才 stage——用户自己的 .gitattributes 不动。
+	if data, err := os.ReadFile(filepath.Join(root, ".gitattributes")); err == nil && journalMergeUnionRe.Match(data) {
+		paths = append(paths, ".gitattributes")
+	}
 	return paths
 }
 
@@ -249,6 +256,34 @@ func printIndexLockWarning(action, taskName, root string, paths []string, errOut
 	fmt.Fprintf(errOut, "[警告] 或确认锁已过期后删除 %s，再手动提交：git add -A -- %s && git commit -m \"chore(task): archive %s\"\n", lock, strings.Join(paths, " "), taskName)
 }
 
+// gitIdentityMissing 检查 git 身份是否缺失，返回缺失的键名
+// （user.name / user.email）。`git config <键>` 退出码非 0 或值为空都算缺失。
+func gitIdentityMissing(root string) []string {
+	var missing []string
+	for _, key := range []string{"user.name", "user.email"} {
+		code, out, _ := runGit(root, 15*time.Second, "config", key)
+		if code != 0 || strings.TrimSpace(out) == "" {
+			missing = append(missing, key)
+		}
+	}
+	return missing
+}
+
+// printGitIdentityWarning 打印 git 身份缺失警告（风格同 printGitignoreWarning）：
+// 说明缺了哪项、文件已写盘 git 未动、给修复方法。调用方跳过自动提交即可，
+// 不要让整个归档/add-session 操作失败。
+func printGitIdentityWarning(missing []string, errOut io.Writer) {
+	if errOut == nil {
+		return
+	}
+	fmt.Fprintf(errOut, "[警告] git 身份未设置（缺失：%s），自动提交已跳过。\n", strings.Join(missing, "、"))
+	fmt.Fprintln(errOut, "[警告] 任务/会话文件已写入磁盘，git 未动。")
+	fmt.Fprintln(errOut, "[警告]")
+	fmt.Fprintln(errOut, "[警告] 修复方法（二选一）：")
+	fmt.Fprintln(errOut, "[警告]   1. 设置 git 身份：git config user.name \"名字\"；git config user.email \"邮箱\"")
+	fmt.Fprintln(errOut, "[警告]   2. 或在 .sunshine/config.yaml 里设置 session_auto_commit: false，让脚本完全跳过 git")
+}
+
 // autoCommitArchive 是 archive 的自动提交（对应 _auto_commit_archive）。
 // 返回是否“可以继续按成功处理”（提交失败但源任务未被追踪时也返回 true，
 // 因为磁盘移动已完成且无历史可写）。
@@ -256,6 +291,10 @@ func autoCommitArchive(root, taskName string, modifiedChildren []string, errOut 
 	extras := LoadConfigExtras(root)
 	if !extras.SessionAutoCommit {
 		fmt.Fprintln(errOut, "[OK] session_auto_commit: false——跳过 git 提交。")
+		return true
+	}
+	if missing := gitIdentityMissing(root); len(missing) > 0 {
+		printGitIdentityWarning(missing, errOut)
 		return true
 	}
 	sourceRel := DirSunshine + "/" + DirTasks + "/" + taskName

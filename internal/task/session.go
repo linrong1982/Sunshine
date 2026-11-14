@@ -1106,6 +1106,10 @@ func autoCommitWorkspace(root string, errOut io.Writer) string {
 		fmt.Fprintln(errOut, "[警告] 不是 git 仓库——journal/index 已写入，跳过自动提交。")
 		return commitBlocked
 	}
+	if missing := gitIdentityMissing(root); len(missing) > 0 {
+		printGitIdentityWarning(missing, errOut)
+		return commitBlocked
+	}
 	commitMsg := extras.SessionCommitMessage
 	currentTaskName := ""
 	if active := ResolveActiveTask(root, "current", ""); active.TaskPath != "" {
